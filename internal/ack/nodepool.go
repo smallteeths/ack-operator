@@ -3,6 +3,7 @@ package ack
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/sirupsen/logrus"
 	"strings"
 
 	ackv1 "github.com/cnrancher/ack-operator/pkg/apis/ack.pandaria.io/v1"
@@ -73,6 +74,9 @@ func UpdateNodePoolBatch(client *sdk.Client, configSpec *ackv1.ACKClusterConfigS
 		upstreamNodePoolInfoMap[np.NodepoolId] = np
 		nodePoolNameKeyMap[np.Name] = np
 	}
+	logrus.Infof("aliyun upstreamNodePoolInfoMap %v", upstreamNodePoolInfoMap)
+	logrus.Infof("aliyun nodePoolNameKeyMap %v", nodePoolNameKeyMap)
+	logrus.Infof("rancher configSpec.NodePoolList %v", configSpec.NodePoolList)
 	// fix node pool id is empty after created
 	for i, info := range configSpec.NodePoolList {
 		if nodePool, ok := nodePoolNameKeyMap[info.Name]; ok {
@@ -101,6 +105,7 @@ func UpdateNodePoolBatch(client *sdk.Client, configSpec *ackv1.ACKClusterConfigS
 	}
 
 	// create node pool
+	var failedMsg []string
 	for _, np := range createQueue {
 		c, err := CreateNodePool(client, configSpec, &np)
 		if err != nil {
@@ -116,10 +121,17 @@ func UpdateNodePoolBatch(client *sdk.Client, configSpec *ackv1.ACKClusterConfigS
 				configSpec.NodePoolList[j].NodepoolId = tea.StringValue(c.NodepoolId)
 			}
 		}
+		flag = Changed
+		_, errMsg := ScaleUpNodePool(client, configSpec, &np, np.InstancesNum)
+		if errMsg != nil {
+			if !isThrottlingError(err) && !isUnexpectedStatusError(err) {
+				failedMsg = append(failedMsg, fmt.Sprintf("%s(scale up error:%s)", np.NodepoolId, errMsg.Error()))
+			}
+			continue
+		}
 	}
 
 	// update node pool
-	var failedMsg []string
 	for _, np := range updateQueue {
 		unp, ok := upstreamNodePoolInfoMap[np.NodepoolId]
 		if !ok {
@@ -173,7 +185,7 @@ func UpdateNodePoolBatch(client *sdk.Client, configSpec *ackv1.ACKClusterConfigS
 	for _, np := range nodePoolsInfo {
 		npId := np.NodepoolId
 		_, ok := updatedIdMap[npId]
-		if !ok {
+		if !ok && np.Name != DefaultNodePoolName {
 			flag = Changed
 			nodes, err := GetClusterNodes(client, configSpec, npId)
 			if err != nil {
